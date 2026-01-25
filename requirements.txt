@@ -1,0 +1,6 @@
+Flask
+Flask-CORS
+Flask-SQLAlchemy
+PyJWT
+beautifulsoup4
+pymongo

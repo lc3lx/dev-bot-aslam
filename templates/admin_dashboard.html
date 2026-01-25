@@ -1,0 +1,386 @@
+{% extends "base.html" %} {% block title %}لوحة التحكم{% endblock %} {% block
+content %}
+<style>
+  @media (max-width: 768px) {
+    .d-flex.justify-content-between.align-items-center {
+      flex-direction: column;
+      align-items: flex-start !important;
+      gap: 12px;
+    }
+
+    .table-responsive {
+      font-size: 13px;
+    }
+
+    .btn {
+      width: 100%;
+    }
+
+    .d-flex.flex-wrap.gap-2 {
+      flex-direction: column;
+    }
+
+    #subscriptionForm .btn {
+      width: 100%;
+    }
+  }
+</style>
+<div class="container">
+  <div class="row mb-4">
+    <div class="col-md-12">
+      <div class="d-flex justify-content-between align-items-center">
+        <h2>لوحة التحكم</h2>
+        <a href="{{ url_for('admin_logout') }}" class="btn btn-danger"
+          >تسجيل الخروج</a
+        >
+      </div>
+    </div>
+  </div>
+
+  <!-- Statistics Cards -->
+  <div class="row mb-4">
+    <div class="col-md-6">
+      <div class="card">
+        <div class="card-body">
+          <h5 class="card-title">إحصائيات المستخدمين</h5>
+          <p class="card-text">إجمالي المستخدمين: {{ total_users }}</p>
+          <p class="card-text">الاشتراكات النشطة: {{ active_subscriptions }}</p>
+        </div>
+      </div>
+    </div>
+    <div class="col-md-6">
+      <div class="card">
+        <div class="card-body">
+          <h5 class="card-title">إنشاء رابط اشتراك جديد</h5>
+          <form id="subscriptionForm" class="mt-3">
+            <div class="mb-3">
+              <label for="userId" class="form-label">معرف المستخدم</label>
+              <input type="text" class="form-control" id="userId" required />
+            </div>
+            <div class="mb-3">
+              <label for="role" class="form-label">نوع المستخدم</label>
+              <select class="form-select" id="role" required>
+                <option value="normal1">مستخدم عادي</option>
+                <option value="normal2">مستخدم مميز</option>
+              </select>
+            </div>
+            <button type="submit" class="btn btn-primary">إنشاء الرابط</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Service Buttons -->
+  <div class="row mb-4">
+    <div class="col-md-12">
+      <div class="card">
+        <div class="card-body">
+          <h5 class="card-title">الخدمات المتاحة</h5>
+          <div class="mb-3">
+            <label for="email" class="form-label">البريد الإلكتروني</label>
+            <input type="email" class="form-control" id="email" required />
+          </div>
+          <div class="d-flex flex-wrap gap-2">
+            <button onclick="fetchResidenceCode()" class="btn btn-primary">
+              <i class="fas fa-key"></i> طلب رمز السكن
+            </button>
+            <button onclick="fetchVerificationCode()" class="btn btn-primary">
+              <i class="fas fa-shield-alt"></i> طلب رمز التحقق
+            </button>
+            <button
+              onclick="fetchResidenceUpdateLink()"
+              class="btn btn-primary"
+            >
+              <i class="fas fa-link"></i> طلب رابط تحديث السكن
+            </button>
+            <button onclick="fetchPasswordResetLink()" class="btn btn-primary">
+              <i class="fas fa-lock"></i> طلب استعادة كلمة المرور
+            </button>
+            <button onclick="fetchLoginCode()" class="btn btn-primary">
+              <i class="fas fa-sign-in-alt"></i> طلب رمز تسجيل الدخول
+            </button>
+            <button
+              onclick="fetchSuspendedAccountLink()"
+              class="btn btn-primary"
+            >
+              <i class="fas fa-user-lock"></i> طلب رابط عضويتك معلقة
+            </button>
+          </div>
+          <div id="apiResult" class="mt-3"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Recent Requests -->
+  <div class="row">
+    <div class="col-md-12">
+      <div class="card">
+        <div class="card-body">
+          <h5 class="card-title">آخر الطلبات</h5>
+          <div class="table-responsive">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th>المستخدم</th>
+                  <th>نوع الطلب</th>
+                  <th>الحساب</th>
+                  <th>الحالة</th>
+                  <th>الوقت</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for request in recent_requests %}
+                <tr>
+                  <td>{{ request.user_id }}</td>
+                  <td>{{ request.request_type }}</td>
+                  <td>{{ request.account }}</td>
+                  <td>
+                    {% if request.status == 'success' %}
+                    <span class="badge bg-success">نجاح</span>
+                    {% else %}
+                    <span class="badge bg-danger">فشل</span>
+                    {% endif %}
+                  </td>
+                  <td>{{ request.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %} {% block scripts %}
+<link
+  rel="stylesheet"
+  href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css"
+/>
+<script>
+  function copyToClipboard(text) {
+    try {
+      navigator.clipboard
+        .writeText(text)
+        .then(() => {
+          const copyBtn = document.getElementById("copyBtn");
+          if (copyBtn) {
+            copyBtn.innerHTML = '<i class="fas fa-check"></i> تم النسخ';
+            setTimeout(() => {
+              copyBtn.innerHTML = '<i class="fas fa-copy"></i> نسخ';
+            }, 2000);
+          }
+        })
+        .catch((err) => {
+          console.error("Failed to copy:", err);
+          alert("فشل نسخ النص. يرجى المحاولة مرة أخرى.");
+        });
+    } catch (err) {
+      console.error("Copy error:", err);
+      alert("فشل نسخ النص. يرجى المحاولة مرة أخرى.");
+    }
+  }
+
+  async function callApi(endpoint, email) {
+    const resultDiv = document.getElementById("apiResult");
+    if (!resultDiv) return;
+
+    try {
+      if (!email) {
+        resultDiv.innerHTML = `
+          <div class="alert alert-warning mb-0">
+            <i class="fas fa-exclamation-triangle"></i> الرجاء إدخال البريد الإلكتروني
+          </div>
+        `;
+        return;
+      }
+
+      email = email.trim();
+      if (!email) {
+        resultDiv.innerHTML = `
+          <div class="alert alert-warning mb-0">
+            <i class="fas fa-exclamation-triangle"></i> الرجاء إدخال بريد إلكتروني صحيح
+          </div>
+        `;
+        return;
+      }
+
+      // Show loading state
+      resultDiv.innerHTML = `
+        <div class="alert alert-info">
+          <i class="fas fa-spinner fa-spin"></i> جاري البحث...
+        </div>
+      `;
+
+      const response = await fetch(`/api/${endpoint}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+          Origin: window.location.origin,
+          "X-Requested-With": "XMLHttpRequest",
+        },
+        credentials: "include",
+        mode: "cors",
+        body: JSON.stringify({ account: email }),
+      });
+
+      let data;
+      try {
+        data = await response.json();
+      } catch (e) {
+        console.error("JSON Parse Error:", e);
+        throw new Error("فشل في قراءة البيانات من الخادم");
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || "حدث خطأ في الخادم");
+      }
+
+      if (data.error) {
+        resultDiv.innerHTML = `
+          <div class="alert alert-danger mb-0">
+            <i class="fas fa-exclamation-circle"></i> ${data.error}
+          </div>
+        `;
+        return;
+      }
+
+      let content = "";
+      if (data.link) {
+        content = data.link;
+      } else if (data.code) {
+        content = data.code;
+      } else if (data.result) {
+        content = data.result;
+      }
+
+      if (!content) {
+        resultDiv.innerHTML = `
+          <div class="alert alert-warning mb-0">
+            <i class="fas fa-exclamation-triangle"></i> لم يتم العثور على نتيجة لهذا الطلب
+          </div>
+        `;
+        return;
+      }
+
+      // Escape HTML to prevent XSS
+      const escapedContent = content.replace(/[&<>"']/g, function (m) {
+        const map = {
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;",
+        };
+        return map[m];
+      });
+
+      resultDiv.innerHTML = `
+        <div class="alert alert-success mb-0">
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <span><i class="fas fa-check-circle"></i> تم جلب البيانات بنجاح</span>
+            <button id="copyBtn" class="btn btn-sm btn-outline-success" onclick="copyToClipboard('${escapedContent}')">
+              <i class="fas fa-copy"></i> نسخ
+            </button>
+          </div>
+          <div class="form-control bg-light">${escapedContent}</div>
+          ${
+            data.link
+              ? `<a href="${escapedContent}" class="btn btn-success w-100 mt-2" target="_blank" rel="noopener noreferrer">فتح الرابط</a>`
+              : ""
+          }
+        </div>
+      `;
+    } catch (error) {
+      console.error("API Error:", error);
+      resultDiv.innerHTML = `
+        <div class="alert alert-danger mb-0">
+          <i class="fas fa-exclamation-circle"></i> ${
+            error.message || "حدث خطأ في العملية"
+          }
+        </div>
+      `;
+    }
+  }
+
+  async function fetchResidenceCode() {
+    const email = document.getElementById("email").value;
+    await callApi("fetch-residence-code", email);
+  }
+
+  async function fetchResidenceUpdateLink() {
+    const email = document.getElementById("email").value;
+    await callApi("fetch-residence-update-link", email);
+  }
+
+  async function fetchPasswordResetLink() {
+    const email = document.getElementById("email").value;
+    await callApi("fetch-password-reset-link", email);
+  }
+
+  async function fetchLoginCode() {
+    const email = document.getElementById("email").value;
+    await callApi("fetch-login-code", email);
+  }
+
+  async function fetchVerificationCode() {
+    const email = document.getElementById("email").value;
+    await callApi("fetch-verification-code", email);
+  }
+
+  async function fetchSuspendedAccountLink() {
+    const email = document.getElementById("email").value;
+    await callApi("fetch-suspended-account-link", email);
+  }
+
+  document
+    .getElementById("subscriptionForm")
+    .addEventListener("submit", async (e) => {
+      e.preventDefault();
+
+      const userId = document.getElementById("userId").value;
+      const role = document.getElementById("role").value;
+
+      try {
+        const response = await fetch("/api/generate-subscription-link", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ user_id: userId, role: role }),
+        });
+
+        const data = await response.json();
+
+        if (data.error) {
+          alert(data.error);
+          return;
+        }
+
+        // عرض الرابط مع زر النسخ
+        const resultDiv = document.createElement("div");
+        resultDiv.className = "alert alert-success mt-3";
+        resultDiv.innerHTML = `
+          <div class="d-flex justify-content-between align-items-center">
+            <div class="flex-grow-1">
+              <strong>تم إنشاء الرابط بنجاح:</strong>
+              <div class="form-control bg-light mt-2" style="word-break: break-all;">${data.link}</div>
+            </div>
+            <button class="btn btn-outline-primary ms-2" onclick="copyToClipboard('${data.link}')">
+              <i class="fas fa-copy"></i> نسخ
+            </button>
+          </div>
+        `;
+
+        // إضافة النتيجة بعد النموذج
+        const form = document.getElementById("subscriptionForm");
+        form.parentNode.insertBefore(resultDiv, form.nextSibling);
+      } catch (error) {
+        alert("حدث خطأ أثناء إنشاء الرابط");
+      }
+    });
+</script>
+{% endblock %}

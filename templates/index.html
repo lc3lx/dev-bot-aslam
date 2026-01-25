@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}الصفحة الرئيسية{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body text-center">
+                <h2 class="mb-4">مرحباً بكم</h2>
+                <p class="mb-4">مرحباً بكم في نظام إدارة المستخدمين</p>
+                <a href="{{ url_for('admin_login') }}" class="btn btn-primary">تسجيل دخول المدير</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
