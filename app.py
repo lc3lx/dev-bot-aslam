@@ -1,4 +1,6 @@
 import os
+import secrets
+import string
 from datetime import datetime, timedelta, UTC
 import time
 import re
@@ -349,7 +351,7 @@ def generate_subscription_link():
         user_id = data.get('user_id')
         role = data.get('role')
         
-        if not user_id or role not in ['normal1', 'normal2']:
+        if not user_id or role not in ['normal1', 'normal2', 'normal3']:
             return jsonify(error='Invalid user_id or role'), 400
         
         # Create or update user
@@ -361,31 +363,75 @@ def generate_subscription_link():
         
         # Create subscription
         expires_at = datetime.now(UTC) + timedelta(days=30)
+        update_payload = {
+            "user_id": user_id,
+            "role": role,
+            "created_at": datetime.now(UTC),
+            "expires_at": expires_at
+        }
+        
+        if role == 'normal3':
+            # روابط قصيرة جداً لنوع 3: /s/XXXXXX فقط (6 أحرف)
+            alphabet = string.ascii_letters + string.digits
+            for _ in range(50):
+                short_code = ''.join(secrets.choice(alphabet) for _ in range(6))
+                if not subscriptions_coll.find_one({"short_code": short_code}):
+                    update_payload["short_code"] = short_code
+                    break
+            else:
+                return jsonify(error='تعذر إنشاء رمز قصير، جرّب مرة أخرى'), 500
+        
+        update_doc = {"$set": update_payload}
+        if role != 'normal3':
+            update_doc["$unset"] = {"short_code": ""}
         subscriptions_coll.update_one(
             {"user_id": user_id},
-            {
-                "$set": {
-                    "user_id": user_id,
-                    "role": role,
-                    "created_at": datetime.now(UTC),
-                    "expires_at": expires_at
-                }
-            },
+            update_doc,
             upsert=True
         )
         
-        # Generate JWT token
-        payload = {
-            'user_id': user_id,
-            'role': role,
-            'exp': expires_at
-        }
-        token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
-        link = f"{request.host_url}user/{token}"
+        if role == 'normal3':
+            link = f"{request.host_url.rstrip('/')}/s/{update_payload['short_code']}"
+        else:
+            payload = {
+                'user_id': user_id,
+                'role': role,
+                'exp': expires_at
+            }
+            token = jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+            link = f"{request.host_url}user/{token}"
         
         return jsonify(link=link), 200
     except Exception as e:
         return jsonify(error=str(e)), 500
+
+@app.route('/s/<short_code>')
+def short_subscribe(short_code):
+    """رابط قصير لنوع المستخدم 3: مثال /s/Ab12Xy"""
+    try:
+        app.permanent_session_lifetime = timedelta(days=30)
+        session.permanent = True
+        subscription = subscriptions_coll.find_one({
+            "short_code": short_code,
+            "expires_at": {"$gt": datetime.now(UTC)}
+        })
+        if not subscription:
+            session.clear()
+            return render_template('invalid.html')
+        user_id = subscription["user_id"]
+        role = subscription["role"]
+        if role != 'normal3':
+            session.clear()
+            return render_template('invalid.html')
+        session['user_id'] = user_id
+        session['user_role'] = role
+        session['last_activity'] = datetime.now(UTC).isoformat()
+        return render_template('user.html', user_id=user_id, role=role)
+    except Exception as e:
+        print(f"Error in short_subscribe: {e}")
+        session.clear()
+        return render_template('error.html', error="حدث خطأ في قراءة البيانات من الخادم")
+
 
 @app.route('/user/<token>')
 def user_page(token):
@@ -429,7 +475,6 @@ def user_page(token):
         session['user_role'] = role
         session['token'] = token
         session['last_activity'] = datetime.now(UTC).isoformat()
-        
         print(f"Session created successfully for user: {user_id}")
         return render_template('user.html', user_id=user_id, role=role)
     except Exception as e:
@@ -645,6 +690,7 @@ def init_db():
     users_coll.create_index("username", unique=True)
     requests_coll.create_index([("timestamp", -1)])
     subscriptions_coll.create_index([("expires_at", 1)])
+    subscriptions_coll.create_index("short_code", unique=True, sparse=True)
 
 def log_request(admin_id, request_type, account, status, result=None):
     requests_coll.insert_one({

@@ -469,6 +469,13 @@ content %}
             >
               <i class="fas fa-lock me-2"></i> طلب استعادة كلمة المرور
             </button>
+            {% elif role == 'normal3' %}
+            <button
+              onclick="fetchLoginCode()"
+              class="btn btn-primary text-start service-button"
+            >
+              <i class="fas fa-sign-in-alt me-2"></i> طلب رمز تسجيل الدخول
+            </button>
             {% else %}
             <div class="alert alert-warning mb-0">نوع مستخدم غير معروف</div>
             {% endif %}
