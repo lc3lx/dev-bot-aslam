@@ -103,7 +103,7 @@ JWT_ALGORITHM = 'HS256'
 
 # إعدادات البريد الإلكتروني
 EMAIL = 'mtgrflix199@gmail.com'
-PASSWORD =  'xwwd txyj kuck ypjl'
+PASSWORD =  'yovk bkkt qadm rbbg'
 IMAP_SERVER ='imap.gmail.com'
 
 # فتح الاتصال بالبريد مرة واحدة فقط
