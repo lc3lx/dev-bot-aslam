@@ -151,18 +151,36 @@ def retry_imap_connection():
     raise Exception("فشل الاتصال بخادم البريد الإلكتروني")
 
 
+def get_decoded_subject(msg):
+    raw_subject = msg.get("Subject", "")
+    if not raw_subject:
+        return ""
+    try:
+        decoded_parts = decode_header(raw_subject)
+        subject_str = ""
+        for content, enc in decoded_parts:
+            if isinstance(content, bytes):
+                subject_str += content.decode(enc or 'utf-8', errors='ignore')
+            else:
+                subject_str += str(content)
+        return subject_str
+    except Exception:
+        return str(raw_subject)
+
+
 def ensure_selected_mailbox(mailbox="inbox", readonly=True):
     global mail
     retry_imap_connection()
     try:
+        current_state = getattr(mail, "state", "").upper()
+        if current_state == "SELECTED":
+            return
         status, data = mail.select(mailbox, readonly=readonly)
+        if status == "OK":
+            return
     except (imaplib.IMAP4.abort, imaplib.IMAP4.error) as e:
         print(f"IMAP SELECT transient failure, reconnecting: {e}")
-        status, data = "NO", [str(e)]
-    if status == "OK":
-        return
 
-    print(f"IMAP SELECT failed ({status}), reconnecting: {data}")
     mail = None
     retry_imap_connection()
     try:
@@ -191,6 +209,7 @@ def run_imap_search(charset, *criteria):
         raise imaplib.IMAP4.error(f"IMAP SEARCH failed: {status} {data}")
     return status, data
 
+
 def retry_on_error(func):
     """ديكورتر لإعادة المحاولة عند حدوث خطأ في جلب الرسائل."""
     def wrapper(*args, **kwargs):
@@ -203,16 +222,11 @@ def retry_on_error(func):
                 err = str(e).lower()
                 if "eof occurred" in err or "socket" in err or "unexpected response" in err or "command: search" in err:
                     mail = None
-                    # time.sleep(2)  # إزالة الانتظار بعد خطأ في الاتصال
                     print(f"Retrying... Attempt {attempt + 1}/{retries}")
                 else:
                     return f"Error fetching emails: {e}"
         return "Error: Failed after multiple retries."
     return wrapper
-
-def build_gmail_query(account, subject_keywords):
-    subject_query = " OR ".join([f'subject:"{keyword}"' for keyword in subject_keywords])
-    return f'to:{account} ({subject_query})'
 
 
 def quote_gmail_query(query):
@@ -220,121 +234,159 @@ def quote_gmail_query(query):
     return f'"{escaped}"'
 
 
-def safe_gmail_search(account, subject_keywords):
-    # Keep IMAP query ASCII-safe. We filter Arabic subjects later in Python.
-    account_query = quote_gmail_query(f"to:{account}")
+def safe_gmail_search_account(account):
+    """البحث السريع عن رسائل الحساب (آخر يومين أولاً للسرعة القصوى، ثم البحث الشامل كخطة بديلة)"""
+    account_clean = account.strip().lower()
+    # 1. البحث السريع في رسائل آخر يومين (أسرع بكثير لأن عدد الرسائل قليل)
     try:
-        return run_imap_search(None, "X-GM-RAW", account_query)
+        query_recent = quote_gmail_query(f"to:{account_clean} newer_than:2d")
+        _, data = run_imap_search(None, "X-GM-RAW", query_recent)
+        mail_ids = data[0].split() if data and data[0] else []
+        if mail_ids:
+            return mail_ids
     except Exception as e:
-        print(f"IMAP account search failed, fallback to ALL: {e}")
-        return run_imap_search(None, "ALL")
+        print(f"Recent search failed: {e}")
+
+    # 2. في حال لم نجد رسائل حديثة، نبحث في كل الرسائل
+    try:
+        query_all = quote_gmail_query(f"to:{account_clean}")
+        _, data = run_imap_search(None, "X-GM-RAW", query_all)
+        mail_ids = data[0].split() if data and data[0] else []
+        if mail_ids:
+            return mail_ids
+    except Exception as e:
+        print(f"All search failed: {e}")
+
+    # 3. خطة بديلة أخيرة
+    try:
+        _, data = run_imap_search(None, "ALL")
+        return data[0].split()[-10:] if data and data[0] else []
+    except Exception as e:
+        print(f"ALL fallback failed: {e}")
+        return []
 
 
-def fetch_email_with_link(account, subject_keywords, button_text):
+def find_target_email_msg(account, subject_keywords):
+    """العثور على أحدث رسالة مطابقة بأقل عدد ممكن من أوامر IMAP لضمان السرعة والدقة"""
+    mail_ids = safe_gmail_search_account(account)
+    if not mail_ids:
+        return None
+
+    # الخطوة 1: فحص أحدث رسالة فوراً (في 95% من الحالات تكون هي الرسالة المطلوبة)
+    latest_id = mail_ids[-1]
+    try:
+        status, msg_data = mail.fetch(latest_id, '(BODY.PEEK[])')
+        if status == "OK" and msg_data and msg_data[0]:
+            msg = email.message_from_bytes(msg_data[0][1])
+            subj = get_decoded_subject(msg).lower()
+            if any(k.lower() in subj for k in subject_keywords):
+                return msg
+    except Exception as e:
+        print(f"Error fetching latest email {latest_id}: {e}")
+
+    # الخطوة 2: إذا لم تكن الرسالة الأخيرة هي المطلوبة، نجلب عناوين الرسائل السابقة دفعة واحدة بأمر واحد فقط
+    if len(mail_ids) > 1:
+        candidates = mail_ids[-5:-1]
+        try:
+            batch_str = b','.join(candidates)
+            status, batch_data = mail.fetch(batch_str, '(BODY.PEEK[HEADER.FIELDS (SUBJECT TO)])')
+            if status == "OK" and batch_data:
+                target_id = None
+                for item in reversed(batch_data):
+                    if isinstance(item, tuple):
+                        hdr_msg = email.message_from_bytes(item[1])
+                        subj = get_decoded_subject(hdr_msg).lower()
+                        if any(k.lower() in subj for k in subject_keywords):
+                            target_id = item[0].split()[0]
+                            break
+                if target_id:
+                    s, m_data = mail.fetch(target_id, '(BODY.PEEK[])')
+                    if s == "OK" and m_data and m_data[0]:
+                        return email.message_from_bytes(m_data[0][1])
+        except Exception as e:
+            print(f"Error in batch candidate search: {e}")
+
+    return None
+
+
+def extract_code_from_email(msg, code_length=4):
+    if not msg:
+        return None
+    for part in msg.walk():
+        if part.get_content_type() in ("text/html", "text/plain"):
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            text = payload.decode('utf-8', errors='ignore')
+            if part.get_content_type() == "text/html":
+                text = BeautifulSoup(text, 'html.parser').get_text()
+            matches = re.findall(rf'\b\d{{{code_length}}}\b', text)
+            for m in matches:
+                # استبعاد سنوات حقوق النشر مثل 2024, 2025, 2026 إذا كان الرمز 4 أرقام
+                if code_length == 4 and m in ("2023", "2024", "2025", "2026", "2027"):
+                    continue
+                return m
+    return None
+
+
+def extract_link_from_email(msg, button_keywords):
+    if not msg:
+        return None
+    for part in msg.walk():
+        if part.get_content_type() == "text/html":
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            html = payload.decode('utf-8', errors='ignore')
+            soup = BeautifulSoup(html, 'html.parser')
+            # 1. البحث بنص الزر
+            for a in soup.find_all('a', href=True):
+                txt = a.get_text().strip().lower()
+                if any(btn.lower() in txt for btn in button_keywords):
+                    return a['href']
+            # 2. خطة بديلة: البحث عن روابط Netflix المميزة
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                if 'netflix.com' in href and any(kw in href.lower() for kw in ('nftoken', 'password', 'household', 'travel', 'code')):
+                    return href
+    return None
+
+
+@retry_on_error
+def fetch_email_with_link(account, subject_keywords, button_keywords):
     try:
         with imap_lock:
             ensure_selected_mailbox("inbox", readonly=True)
-
-            _, data = safe_gmail_search(account, subject_keywords)
-            mail_ids = data[0].split() if data and data[0] else []
-
-            if not mail_ids:
-                # Fallback to broader search if Gmail query yields no results
-                _, data = run_imap_search(None, "ALL")
-                mail_ids = data[0].split()[-10:] if data and data[0] else []
-            
-            result = "طلبك غير موجود."
-            for mail_id in reversed(mail_ids[-5:]):
-                try:
-                    fetch_status, msg_data = mail.fetch(mail_id, "(RFC822)")
-                    if fetch_status != "OK" or not msg_data or not msg_data[0]:
-                        continue
-                    raw_email = msg_data[0][1]
-                    msg = email.message_from_bytes(raw_email)
-
-                    # التحقق من عنوان البريد الإلكتروني
-                    to_address = msg.get('To', '')
-                    if account.lower() not in to_address.lower():
-                        continue
-
-                    subject, encoding = decode_header(msg["Subject"])[0]
-                    if isinstance(subject, bytes):
-                        subject = subject.decode(encoding if encoding else "utf-8")
-
-                    if any(keyword in subject for keyword in subject_keywords):
-                        for part in msg.walk():
-                            if part.get_content_type() == "text/html":
-                                html_content = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                                if account.lower() in html_content.lower():  # Case-insensitive search
-                                    soup = BeautifulSoup(html_content, 'html.parser')
-                                    for a in soup.find_all('a', href=True):
-                                        if button_text in a.get_text():
-                                            result = a['href']
-                                            break
-                    if result != "طلبك غير موجود.":
-                        break
-                except Exception as e:
-                    print(f"Error processing email {mail_id}: {str(e)}")
-                    continue
-                    
-            # Close the connection
-            return result
+            if isinstance(button_keywords, str):
+                button_keywords = [button_keywords]
+            if isinstance(subject_keywords, str):
+                subject_keywords = [subject_keywords]
+            msg = find_target_email_msg(account, subject_keywords)
+            if msg:
+                link = extract_link_from_email(msg, button_keywords)
+                if link:
+                    return link
+            return "طلبك غير موجود."
     except Exception as e:
-        print(f"Error in fetch_email_with_link: {str(e)}")  # Added logging
+        print(f"Error in fetch_email_with_link: {str(e)}")
         return f"Error fetching emails: {e}"
+
 
 @retry_on_error
 def fetch_email_with_code(account, subject_keywords, code_length=4):
     try:
         with imap_lock:
             ensure_selected_mailbox("inbox", readonly=True)
-
-            _, data = safe_gmail_search(account, subject_keywords)
-            mail_ids = data[0].split() if data and data[0] else []
-
-            if not mail_ids:
-                # Fallback to broader search if Gmail query yields no results
-                _, data = run_imap_search(None, "ALL")
-                mail_ids = data[0].split()[-10:] if data and data[0] else []
-            
-            result = "طلبك غير موجود."
-            for mail_id in reversed(mail_ids[-5:]):
-                try:
-                    fetch_status, msg_data = mail.fetch(mail_id, "(RFC822)")
-                    if fetch_status != "OK" or not msg_data or not msg_data[0]:
-                        continue
-                    raw_email = msg_data[0][1]
-                    msg = email.message_from_bytes(raw_email)
-
-                    # التحقق من عنوان البريد الإلكتروني
-                    to_address = msg.get('To', '')
-                    if account.lower() not in to_address.lower():
-                        continue
-
-                    subject, encoding = decode_header(msg["Subject"])[0]
-                    if isinstance(subject, bytes):
-                        subject = subject.decode(encoding if encoding else "utf-8")
-
-                    if any(keyword in subject for keyword in subject_keywords):
-                        for part in msg.walk():
-                            if part.get_content_type() == "text/html":
-                                html_content = part.get_payload(decode=True).decode('utf-8', errors='ignore')
-                                if account.lower() in html_content.lower():  # Case-insensitive search
-                                    code_pattern = rf'\b\d{{{code_length}}}\b'
-                                    code_match = re.search(code_pattern, BeautifulSoup(html_content, 'html.parser').get_text())
-                                    if code_match:
-                                        result = code_match.group(0)
-                                        break
-                    if result != "طلبك غير موجود.":
-                        break
-                except Exception as e:
-                    print(f"Error processing email {mail_id}: {str(e)}")
-                    continue
-                    
-            # Close the connection
-            return result
+            if isinstance(subject_keywords, str):
+                subject_keywords = [subject_keywords]
+            msg = find_target_email_msg(account, subject_keywords)
+            if msg:
+                code = extract_code_from_email(msg, code_length)
+                if code:
+                    return code
+            return "طلبك غير موجود."
     except Exception as e:
-        print(f"Error in fetch_email_with_code: {str(e)}")  # Added logging
+        print(f"Error in fetch_email_with_code: {str(e)}")
         return f"Error fetching emails: {e}"
 
 # ----------------------------------
@@ -537,6 +589,25 @@ def user_page(token):
         session.clear()
         return render_template('error.html', error="حدث خطأ في قراءة البيانات من الخادم")
 
+# ----------------------------------
+# تخزين مؤقت للرموز والروابط لمنع تكرار البحث وتسريع الاستجابة الفورية
+# ----------------------------------
+recent_code_cache = {}
+CACHE_TTL = 20  # ثانية واحدة كافية لالتقاط النقرات المتكررة فورياً
+
+def get_cached_result(account, req_type):
+    key = (account.lower().strip(), req_type)
+    if key in recent_code_cache:
+        val, ts = recent_code_cache[key]
+        if time.time() - ts < CACHE_TTL and val and val != "طلبك غير موجود.":
+            return val
+    return None
+
+def set_cached_result(account, req_type, result):
+    if result and result != "طلبك غير موجود.":
+        key = (account.lower().strip(), req_type)
+        recent_code_cache[key] = (result, time.time())
+
 # Email-fetch APIs with logging
 @app.route('/api/fetch-residence-update-link', methods=['POST', 'OPTIONS'])
 def fetch_residence_update_link():
@@ -563,8 +634,18 @@ def fetch_residence_update_link():
         account = account.strip()
         if not account:
             return jsonify(error='Account cannot be empty'), 400, {'Content-Type': 'application/json'}
+
+        cached = get_cached_result(account, 'residence_update_link')
+        if cached:
+            return jsonify(link=cached), 200, {'Content-Type': 'application/json'}
         
-        link = fetch_email_with_link(account, ["تحديث السكن"], "نعم، أنا قدمت الطلب")
+        link = fetch_email_with_link(
+            account,
+            ["تحديث السكن", "household", "primary location"],
+            ["نعم، أنا قدمت الطلب", "Yes, this was me", "تحديث السكن", "Update Household", "confirm"]
+        )
+        if link and link != "طلبك غير موجود.":
+            set_cached_result(account, 'residence_update_link', link)
         log_request(session.get('admin_id', 'unknown'), 'residence_update_link', account, 'success' if link else 'not_found', link)
         return jsonify(link=link), 200, {'Content-Type': 'application/json'}
     except Exception as e:
@@ -597,8 +678,18 @@ def fetch_residence_code():
         account = account.strip()
         if not account:
             return jsonify(error='Account cannot be empty'), 400, {'Content-Type': 'application/json'}
+
+        cached = get_cached_result(account, 'residence_code')
+        if cached:
+            return jsonify(code=cached), 200, {'Content-Type': 'application/json'}
         
-        code = fetch_email_with_link(account, ["رمز الوصول المؤقت"], "الحصول على الرمز")
+        code = fetch_email_with_link(
+            account,
+            ["رمز الوصول المؤقت", "temporary access", "household", "رمز الوصول"],
+            ["الحصول على الرمز", "Get Code", "احصل على الرمز", "رمز الوصول"]
+        )
+        if code and code != "طلبك غير موجود.":
+            set_cached_result(account, 'residence_code', code)
         log_request(session.get('admin_id', 'unknown'), 'residence_code', account, 'success' if code else 'not_found', code)
         return jsonify(code=code), 200, {'Content-Type': 'application/json'}
     except Exception as e:
@@ -631,8 +722,18 @@ def fetch_password_reset_link():
         account = account.strip()
         if not account:
             return jsonify(error='Account cannot be empty'), 400, {'Content-Type': 'application/json'}
+
+        cached = get_cached_result(account, 'password_reset_link')
+        if cached:
+            return jsonify(link=cached), 200, {'Content-Type': 'application/json'}
         
-        link = fetch_email_with_link(account, ["إعادة تعيين كلمة المرور"], "إعادة تعيين كلمة المرور")
+        link = fetch_email_with_link(
+            account,
+            ["إعادة تعيين كلمة المرور", "password reset", "reset your password"],
+            ["إعادة تعيين كلمة المرور", "Reset Password"]
+        )
+        if link and link != "طلبك غير موجود.":
+            set_cached_result(account, 'password_reset_link', link)
         log_request(session.get('admin_id', 'unknown'), 'password_reset_link', account, 'success' if link else 'not_found', link)
         return jsonify(link=link), 200, {'Content-Type': 'application/json'}
     except Exception as e:
@@ -665,8 +766,17 @@ def fetch_login_code():
         account = account.strip()
         if not account:
             return jsonify(error='Account cannot be empty'), 400, {'Content-Type': 'application/json'}
+
+        cached = get_cached_result(account, 'login_code')
+        if cached:
+            return jsonify(code=cached), 200, {'Content-Type': 'application/json'}
         
-        code = fetch_email_with_code(account, ["رمز تسجيل الدخول"])
+        code = fetch_email_with_code(
+            account,
+            ["رمز تسجيل الدخول", "sign-in code", "sign in code", "login code"]
+        )
+        if code and code != "طلبك غير موجود.":
+            set_cached_result(account, 'login_code', code)
         log_request(session.get('admin_id', 'unknown'), 'login_code', account, 'success' if code else 'not_found', code)
         return jsonify(code=code), 200, {'Content-Type': 'application/json'}
     except Exception as e:
@@ -700,7 +810,17 @@ def fetch_verification_code():
         if not account:
             return jsonify(error='Account cannot be empty'), 400, {'Content-Type': 'application/json'}
 
-        code = fetch_email_with_code(account, ["رمز التحقق"], code_length=6)
+        cached = get_cached_result(account, 'verification_code')
+        if cached:
+            return jsonify(code=cached), 200, {'Content-Type': 'application/json'}
+
+        code = fetch_email_with_code(
+            account,
+            ["رمز التحقق", "verification code", "verify your account"],
+            code_length=6
+        )
+        if code and code != "طلبك غير موجود.":
+            set_cached_result(account, 'verification_code', code)
         log_request(session.get('admin_id', 'unknown'), 'verification_code', account, 'success' if code else 'not_found', code)
         return jsonify(code=code), 200, {'Content-Type': 'application/json'}
     except Exception as e:
@@ -733,8 +853,18 @@ def fetch_suspended_account_link():
         account = account.strip()
         if not account:
             return jsonify(error='Account cannot be empty'), 400, {'Content-Type': 'application/json'}
+
+        cached = get_cached_result(account, 'suspended_account_link')
+        if cached:
+            return jsonify(link=cached), 200, {'Content-Type': 'application/json'}
         
-        link = fetch_email_with_link(account, ["عضويتك في Netflix معلّقة"], "إضافة معلومات الدفع")
+        link = fetch_email_with_link(
+            account,
+            ["عضويتك في Netflix معلّقة", "معلّقة", "membership on hold", "membership paused"],
+            ["إضافة معلومات الدفع", "Update payment", "إعادة تفعيل العضوية", "Restart Membership"]
+        )
+        if link and link != "طلبك غير موجود.":
+            set_cached_result(account, 'suspended_account_link', link)
         log_request(session.get('admin_id', 'unknown'), 'suspended_account_link', account, 'success' if link else 'not_found', link)
         return jsonify(link=link), 200, {'Content-Type': 'application/json'}
     except Exception as e:
