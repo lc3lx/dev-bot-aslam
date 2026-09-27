@@ -220,11 +220,7 @@ content %}
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json",
-          Origin: window.location.origin,
-          "X-Requested-With": "XMLHttpRequest",
         },
-        credentials: "include",
-        mode: "cors",
         body: JSON.stringify({ account: email }),
       });
 
@@ -297,11 +293,13 @@ content %}
       `;
     } catch (error) {
       console.error("API Error:", error);
+      let errMsg = error.message || "حدث خطأ في العملية";
+      if (errMsg === "Load failed" || errMsg === "Failed to fetch") {
+        errMsg = "تعذر الاتصال بالخادم، يرجى المحاولة مرة أخرى أو التحقق من الاتصال";
+      }
       resultDiv.innerHTML = `
         <div class="alert alert-danger mb-0">
-          <i class="fas fa-exclamation-circle"></i> ${
-            error.message || "حدث خطأ في العملية"
-          }
+          <i class="fas fa-exclamation-circle"></i> ${errMsg}
         </div>
       `;
     }

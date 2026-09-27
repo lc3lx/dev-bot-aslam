@@ -40,6 +40,7 @@ def after_request(response):
         if origin:
             response.headers['Access-Control-Allow-Origin'] = origin
             response.headers['Vary'] = 'Origin'
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
         else:
             response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,Accept,Origin,X-Requested-With'
@@ -134,7 +135,7 @@ def retry_imap_connection():
         mail = None
     for attempt in range(3):
         try:
-            mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+            mail = imaplib.IMAP4_SSL(IMAP_SERVER, timeout=15)
             mail.login(EMAIL, PASSWORD)
             try:
                 mail.enable("UTF8=ACCEPT")
@@ -240,10 +241,10 @@ def fetch_email_with_link(account, subject_keywords, button_text):
             if not mail_ids:
                 # Fallback to broader search if Gmail query yields no results
                 _, data = run_imap_search(None, "ALL")
-                mail_ids = data[0].split()[-20:] if data and data[0] else []
+                mail_ids = data[0].split()[-10:] if data and data[0] else []
             
             result = "طلبك غير موجود."
-            for mail_id in reversed(mail_ids[-20:]):
+            for mail_id in reversed(mail_ids[-5:]):
                 try:
                     fetch_status, msg_data = mail.fetch(mail_id, "(RFC822)")
                     if fetch_status != "OK" or not msg_data or not msg_data[0]:
@@ -294,10 +295,10 @@ def fetch_email_with_code(account, subject_keywords, code_length=4):
             if not mail_ids:
                 # Fallback to broader search if Gmail query yields no results
                 _, data = run_imap_search(None, "ALL")
-                mail_ids = data[0].split()[-20:] if data and data[0] else []
+                mail_ids = data[0].split()[-10:] if data and data[0] else []
             
             result = "طلبك غير موجود."
-            for mail_id in reversed(mail_ids[-20:]):
+            for mail_id in reversed(mail_ids[-5:]):
                 try:
                     fetch_status, msg_data = mail.fetch(mail_id, "(RFC822)")
                     if fetch_status != "OK" or not msg_data or not msg_data[0]:
@@ -546,6 +547,7 @@ def fetch_residence_update_link():
         response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
         response.headers.add('Access-Control-Max-Age', '3600')
         return response
+    account = ""
     try:
         if not request.is_json:
             return jsonify(error='Content-Type must be application/json'), 400, {'Content-Type': 'application/json'}
@@ -579,6 +581,7 @@ def fetch_residence_code():
         response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
         response.headers.add('Access-Control-Max-Age', '3600')
         return response
+    account = ""
     try:
         if not request.is_json:
             return jsonify(error='Content-Type must be application/json'), 400, {'Content-Type': 'application/json'}
@@ -612,6 +615,7 @@ def fetch_password_reset_link():
         response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
         response.headers.add('Access-Control-Max-Age', '3600')
         return response
+    account = ""
     try:
         if not request.is_json:
             return jsonify(error='Content-Type must be application/json'), 400, {'Content-Type': 'application/json'}
@@ -645,6 +649,7 @@ def fetch_login_code():
         response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
         response.headers.add('Access-Control-Max-Age', '3600')
         return response
+    account = ""
     try:
         if not request.is_json:
             return jsonify(error='Content-Type must be application/json'), 400, {'Content-Type': 'application/json'}
@@ -678,6 +683,7 @@ def fetch_verification_code():
         response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
         response.headers.add('Access-Control-Max-Age', '3600')
         return response
+    account = ""
     try:
         if not request.is_json:
             return jsonify(error='Content-Type must be application/json'), 400, {'Content-Type': 'application/json'}
@@ -711,6 +717,7 @@ def fetch_suspended_account_link():
         response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
         response.headers.add('Access-Control-Max-Age', '3600')
         return response
+    account = ""
     try:
         if not request.is_json:
             return jsonify(error='Content-Type must be application/json'), 400, {'Content-Type': 'application/json'}
