@@ -7,6 +7,7 @@ import re
 import imaplib
 import email
 from email.header import decode_header
+import requests
 from bs4 import BeautifulSoup
 from flask import Flask, request, jsonify, url_for, render_template, redirect, session, send_from_directory
 from flask_cors import CORS
@@ -350,6 +351,79 @@ def extract_link_from_email(msg, button_keywords):
                 if 'netflix.com' in href and any(kw in href.lower() for kw in ('nftoken', 'password', 'household', 'travel', 'code')):
                     return href
     return None
+
+
+def extract_approval_link_from_email(msg, button_keywords):
+    if not msg:
+        return None
+    for part in msg.walk():
+        if part.get_content_type() == "text/html":
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            html = payload.decode('utf-8', errors='ignore')
+            soup = BeautifulSoup(html, 'html.parser')
+            # 1. البحث بنص الزر الصريح مع استبعاد أزرار الرفض
+            for a in soup.find_all('a', href=True):
+                txt = a.get_text().strip().lower()
+                href = a['href'].lower()
+                # تجنب روابط الرفض تماماً
+                if any(rej in txt for rej in ["رفض", "reject", "cancel", "deny"]):
+                    continue
+                if any(rej in href for rej in ["reject", "cancel", "deny", "denied", "unsubscribe"]):
+                    continue
+                if any(btn.lower() in txt for btn in button_keywords):
+                    return a['href']
+            # 2. خطة بديلة: البحث عن روابط netflix المخصصة للموافقة مع استبعاد الرفض
+            for a in soup.find_all('a', href=True):
+                href = a['href']
+                href_lower = href.lower()
+                if 'netflix.com' in href_lower:
+                    if any(rej in href_lower for rej in ["reject", "cancel", "deny", "denied", "unsubscribe", "help", "terms", "privacy"]):
+                        continue
+                    if any(kw in href_lower for kw in ('nftoken', 'confirm', 'travel', 'approve', 'sign-in', 'signin')):
+                        return href
+    return None
+
+
+def click_approval_link(url):
+    """محاكاة النقر على رابط الموافقة بالمتصفح لتأكيد الطلب مباشرة في نتفليكس"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
+            'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124"',
+            'Sec-Ch-Ua-Mobile': '?0',
+            'Sec-Ch-Ua-Platform': '"Windows"',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        resp = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        print(f"Approval link clicked: status_code={resp.status_code}")
+        return True, resp.status_code
+    except Exception as e:
+        print(f"Error clicking approval link: {e}")
+        return False, str(e)
+
+
+@retry_on_error
+def fetch_email_approval_link(account, subject_keywords, button_keywords):
+    try:
+        with imap_lock:
+            ensure_selected_mailbox("inbox", readonly=True)
+            if isinstance(button_keywords, str):
+                button_keywords = [button_keywords]
+            if isinstance(subject_keywords, str):
+                subject_keywords = [subject_keywords]
+            msg = find_target_email_msg(account, subject_keywords)
+            if msg:
+                link = extract_approval_link_from_email(msg, button_keywords)
+                if link:
+                    return link
+            return "طلبك غير موجود."
+    except Exception as e:
+        print(f"Error in fetch_email_approval_link: {str(e)}")
+        return f"Error fetching emails: {e}"
 
 
 @retry_on_error
@@ -870,6 +944,83 @@ def fetch_suspended_account_link():
     except Exception as e:
         print(f"Error in fetch_suspended_account_link: {str(e)}")
         log_request(session.get('admin_id', 'unknown'), 'suspended_account_link', account, 'error', str(e))
+        return jsonify(error=str(e)), 500, {'Content-Type': 'application/json'}
+
+@app.route('/api/approve-login-request', methods=['POST', 'OPTIONS'])
+def approve_login_request():
+    if request.method == 'OPTIONS':
+        response = jsonify({})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,Accept,Origin,X-Requested-With')
+        response.headers.add('Access-Control-Allow-Methods', 'POST,OPTIONS')
+        response.headers.add('Access-Control-Max-Age', '3600')
+        return response
+    account = ""
+    try:
+        if not request.is_json:
+            return jsonify(error='Content-Type must be application/json'), 400, {'Content-Type': 'application/json'}
+            
+        data = request.get_json()
+        if not data:
+            return jsonify(error='No data provided'), 400, {'Content-Type': 'application/json'}
+            
+        account = data.get('account')
+        if not account:
+            return jsonify(error='Account is required'), 400, {'Content-Type': 'application/json'}
+            
+        account = account.strip()
+        if not account:
+            return jsonify(error='Account cannot be empty'), 400, {'Content-Type': 'application/json'}
+
+        cached = get_cached_result(account, 'approve_login_request')
+        if cached:
+            return jsonify(
+                success=True,
+                approved=True,
+                message="تمت الموافقة على تسجيل الدخول بنجاح ✅",
+                link=cached
+            ), 200, {'Content-Type': 'application/json'}
+
+        approval_subjects = [
+            "الموافقة على طلب تسجيل الدخول",
+            "طلب تسجيل الدخول الجديد",
+            "الموافقة على تسجيل الدخول الجديد",
+            "الموافقة على تسجيل الدخول",
+            "طلب تسجيل دخول جديد",
+            "موافقة على تسجيل الدخول",
+            "sign-in request",
+            "approve sign-in",
+            "approve sign in",
+            "new sign-in request",
+            "approve new sign-in"
+        ]
+        approval_buttons = [
+            "الموافقة على تسجيل الدخول",
+            "الموافقة",
+            "approve sign-in",
+            "approve sign in",
+            "approve"
+        ]
+
+        link = fetch_email_approval_link(account, approval_subjects, approval_buttons)
+        if not link or link == "طلبك غير موجود." or "Error" in link:
+            log_request(session.get('admin_id', 'unknown'), 'approve_login_request', account, 'not_found', link)
+            return jsonify(error="لم يتم العثور على رسالة طلب الموافقة. يرجى إرسال الطلب من الشاشة أو الجهاز أولاً."), 404, {'Content-Type': 'application/json'}
+
+        # محاكاة النقر على زر الموافقة مباشرة
+        clicked, status_info = click_approval_link(link)
+        set_cached_result(account, 'approve_login_request', link)
+        log_request(session.get('admin_id', 'unknown'), 'approve_login_request', account, 'success' if clicked else 'click_warning', link)
+
+        return jsonify(
+            success=True,
+            approved=True,
+            message="تمت الموافقة على تسجيل الدخول بنجاح ✅",
+            link=link
+        ), 200, {'Content-Type': 'application/json'}
+    except Exception as e:
+        print(f"Error in approve_login_request: {str(e)}")
+        log_request(session.get('admin_id', 'unknown'), 'approve_login_request', account, 'error', str(e))
         return jsonify(error=str(e)), 500, {'Content-Type': 'application/json'}
 
 # ----------------------------------
