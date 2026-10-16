@@ -974,12 +974,7 @@ def approve_login_request():
 
         cached = get_cached_result(account, 'approve_login_request')
         if cached:
-            return jsonify(
-                success=True,
-                approved=True,
-                message="تمت الموافقة على تسجيل الدخول بنجاح ✅",
-                link=cached
-            ), 200, {'Content-Type': 'application/json'}
+            return jsonify(link=cached), 200, {'Content-Type': 'application/json'}
 
         approval_subjects = [
             "الموافقة على طلب تسجيل الدخول",
@@ -1007,17 +1002,10 @@ def approve_login_request():
             log_request(session.get('admin_id', 'unknown'), 'approve_login_request', account, 'not_found', link)
             return jsonify(error="لم يتم العثور على رسالة طلب الموافقة. يرجى إرسال الطلب من الشاشة أو الجهاز أولاً."), 404, {'Content-Type': 'application/json'}
 
-        # محاكاة النقر على زر الموافقة مباشرة
-        clicked, status_info = click_approval_link(link)
         set_cached_result(account, 'approve_login_request', link)
-        log_request(session.get('admin_id', 'unknown'), 'approve_login_request', account, 'success' if clicked else 'click_warning', link)
+        log_request(session.get('admin_id', 'unknown'), 'approve_login_request', account, 'success', link)
 
-        return jsonify(
-            success=True,
-            approved=True,
-            message="تمت الموافقة على تسجيل الدخول بنجاح ✅",
-            link=link
-        ), 200, {'Content-Type': 'application/json'}
+        return jsonify(link=link), 200, {'Content-Type': 'application/json'}
     except Exception as e:
         print(f"Error in approve_login_request: {str(e)}")
         log_request(session.get('admin_id', 'unknown'), 'approve_login_request', account, 'error', str(e))
